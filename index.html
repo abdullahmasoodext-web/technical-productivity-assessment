@@ -258,13 +258,13 @@
     <div class="scroll" id="peopleTable"></div>
   </div>
 
-  <div class="card">
+  <div class="card" id="ppiCard">
     <div class="card-head"><h2>Post-purchase inspection</h2>
       <span class="sub">Inspections completed against target</span></div>
     <div class="scroll" id="ppiTable"></div>
   </div>
 
-  <div class="card">
+  <div class="card" id="combinedCard">
     <div class="card-head"><h2 id="combinedTitle">Post inspection + combined</h2>
       <span class="sub">Each metric as a share of capacity, added together</span></div>
     <div class="scroll" id="combinedTable"></div>
@@ -671,9 +671,16 @@
     $("peopleScope").textContent = work.length + (work.length === 1 ? " person" : " people")
       + (state.dept ? ", " + state.dept : ", combined")
       + (state.eligible === "yes" ? ", eligible only" : state.eligible === "no" ? ", not eligible" : "");
-    $("ppiTable").innerHTML = ppiTableHTML(rows);
-    $("combinedTitle").textContent = "Post inspection + " + (state.dept || "combined");
-    $("combinedTable").innerHTML = combinedTableHTML(rows);
+    // Inspections are not aftersales work, so both inspection sections
+    // come off the page entirely when Aftersales is the chosen view.
+    var showPpi = state.dept !== "aftersales";
+    $("ppiCard").classList.toggle("hidden", !showPpi);
+    $("combinedCard").classList.toggle("hidden", !showPpi);
+    if (showPpi) {
+      $("ppiTable").innerHTML = ppiTableHTML(rows);
+      $("combinedTitle").textContent = "Post inspection + " + (state.dept || "combined");
+      $("combinedTable").innerHTML = combinedTableHTML(rows);
+    }
     renderSyncFoot();
   }
 
@@ -765,11 +772,11 @@
   // ================================================================
   // Charts
   // ================================================================
-  function dailySeries() {
+  function dailySeries(useExcluded) {
     var shift = {};
     cache.calendar.forEach(function (c) { shift[String(c.work_date).slice(0,10)] = num(c.shift_hours) || 0; });
     var allowed = {};
-    visibleRows(false).forEach(function (p) { allowed[p.key] = 1; });
+    visibleRows(!!useExcluded).forEach(function (p) { allowed[p.key] = 1; });
 
     var byDay = {};
     cache.daily.forEach(function (r) {
@@ -792,7 +799,7 @@
   }
 
   function renderTrend() {
-    var series = dailySeries();
+    var series = dailySeries(false);
     var who = state.person
       ? ((cache.people.filter(function (p) { return p.id === state.person; })[0] || {}).full_name || "Selected person")
       : "Everyone (team average)";
@@ -912,17 +919,41 @@
       + (state.eligible === "yes" ? ", eligible only" : state.eligible === "no" ? ", not eligible" : "");
     var host = document.createElement("div");
     renderTiles(host, t);
+
+    var showPpi = state.dept !== "aftersales";
+
     $("reportBody").innerHTML =
         '<div class="card"><div class="card-head"><h2>Technical Productivity report</h2>'
       + '<span class="sub">' + esc(shortDate(state.from) + " to " + shortDate(state.to) + "  ·  " + scope
         + "  ·  " + work.length + " people") + '</span></div>'
       + '<div class="tiles">' + host.innerHTML + '</div></div>'
+
+      + '<div class="card"><div class="card-head"><h2>Daily trend</h2></div><div class="charts">'
+      +   '<div><div class="legend"><span><i class="dot" style="background:var(--series-1)"></i>Productivity %</span>'
+      +     '<span class="sub">target 100%</span></div>'
+      +     '<div class="plot"><svg id="rChartProd" viewBox="0 0 560 220" role="img" aria-label="Daily productivity"></svg>'
+      +     '<div class="tip" id="rTipProd"></div></div></div>'
+      +   '<div><div class="legend"><span><i class="dot" style="background:var(--series-2)"></i>Efficiency %</span>'
+      +     '<span class="sub">target 100%</span></div>'
+      +     '<div class="plot"><svg id="rChartEff" viewBox="0 0 560 220" role="img" aria-label="Daily efficiency"></svg>'
+      +     '<div class="tip" id="rTipEff"></div></div></div>'
+      + '</div></div>'
+
       + '<div class="card"><div class="card-head"><h2>By employee</h2></div><div class="scroll">'
       + peopleTableHTML(work) + '</div></div>'
-      + '<div class="card"><div class="card-head"><h2>Post-purchase inspection</h2></div><div class="scroll">'
-      + ppiTableHTML(rows) + '</div></div>'
-      + '<div class="card"><div class="card-head"><h2>Post inspection + ' + esc(state.dept || "combined")
-      + '</h2></div><div class="scroll">' + combinedTableHTML(rows) + '</div></div>';
+
+      + (showPpi
+          ? '<div class="card"><div class="card-head"><h2>Post-purchase inspection</h2></div><div class="scroll">'
+            + ppiTableHTML(rows) + '</div></div>'
+            + '<div class="card"><div class="card-head"><h2>Post inspection + ' + esc(state.dept || "combined")
+            + '</h2></div><div class="scroll">' + combinedTableHTML(rows) + '</div></div>'
+          : "");
+
+    // Charts have to be drawn after the markup exists, and they follow
+    // the report's own inclusion list rather than the dashboard's.
+    var series = dailySeries(true);
+    lineChart($("rChartProd"), $("rTipProd"), series, "prod", "var(--series-1)", "Productivity");
+    lineChart($("rChartEff"),  $("rTipEff"),  series, "eff",  "var(--series-2)", "Efficiency");
   }
 
   // ================================================================
