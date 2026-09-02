@@ -137,6 +137,22 @@
 
   /* report overlay */
   .overlay { position:fixed; inset:0; background:var(--page); overflow:auto; z-index:50; padding:20px; }
+  .modal-back { position:fixed; inset:0; background:rgba(0,0,0,.45); z-index:60;
+    display:flex; align-items:center; justify-content:center; padding:20px; }
+  .modal { background:var(--surface-1); border:1px solid var(--border); border-radius:12px;
+    width:100%; max-width:420px; padding:18px; }
+  .modal h2 { margin:0 0 2px; font-size:15px; }
+  .modal .row { display:flex; gap:8px; align-items:center; margin:14px 0 10px; }
+  .modal input[type=date] { flex:1; font:inherit; padding:7px 9px; border-radius:7px;
+    border:1px solid var(--border); background:var(--field); color:var(--text-primary); }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; min-height:26px; }
+  .chip { display:inline-flex; align-items:center; gap:6px; font-size:12px; padding:3px 8px;
+    border-radius:20px; border:1px solid var(--border); color:var(--text-secondary); }
+  .chip button { border:none; background:none; padding:0; line-height:1; font-size:14px;
+    color:var(--text-muted); }
+  .chip button:hover { color:var(--critical); background:none; }
+  .chip.off { opacity:.55; }
+  .modal .foot { display:flex; justify-content:space-between; align-items:center; margin-top:16px; }
   .report-bar { display:flex; gap:10px; align-items:center; flex-wrap:wrap; max-width:1180px; margin:0 auto 16px; }
   .report-bar .sub { margin-right:auto; }
   .picker { display:flex; flex-wrap:wrap; gap:6px 16px; margin:8px 0 4px; }
@@ -273,6 +289,24 @@
   <p class="foot" id="syncFoot"></p>
 </div>
 
+<!-- ========================== ABSENCES ========================== -->
+<div class="modal-back hidden" id="absModal">
+  <div class="modal">
+    <h2 id="absName">Absences</h2>
+    <span class="sub" id="absHint"></span>
+    <div class="row">
+      <input type="date" id="absDate" aria-label="Absence date">
+      <button type="button" class="primary" id="absAdd">Add</button>
+    </div>
+    <div class="chips" id="absChips"></div>
+    <p class="sub" id="absMsg" style="margin:10px 0 0"></p>
+    <div class="foot">
+      <span class="sub" id="absTotal"></span>
+      <button type="button" id="absClose">Done</button>
+    </div>
+  </div>
+</div>
+
 <!-- =========================== REPORT =========================== -->
 <div class="overlay hidden" id="report">
   <div class="report-bar noprint">
@@ -313,13 +347,13 @@
   var MIN_ACTUAL_HOURS = 0.02;   // 72 seconds
 
   // Eligibility thresholds.
-  var ELIGIBLE = { prodProductivity: 80, prodEfficiency: 80, afsEfficiency: 80 };
+  var ELIGIBLE = { prodProductivity: 80, prodEfficiency: 80, afsEfficiency: 80, prodCombined: 80 };
 
   var token = null, refreshToken = null, userEmail = null;
   var reqSeq = 0;                        // guards against out-of-order responses
 
   var state = { preset:"30", from:null, to:null, dept:"", person:"", eligible:"" };
-  var cache = { people:[], daily:[], calendar:[], ppi:[], sync:[] };
+  var cache = { people:[], daily:[], calendar:[], ppi:[], sync:[], absences:[] };
   var model = { rows:[], ppi:[], excluded:{} };
 
   var $ = function (id) { return document.getElementById(id); };
@@ -363,6 +397,7 @@
     opts = opts || {};
     var headers = { apikey: SUPABASE_KEY, "Content-Type": "application/json" };
     if (useToken && token) headers.Authorization = "Bearer " + token;
+    if (opts.headers) Object.keys(opts.headers).forEach(function (k) { headers[k] = opts.headers[k]; });
     return fetch(SUPABASE_URL + path, {
       method: opts.method || "GET",
       headers: headers,
@@ -489,19 +524,26 @@
     var calUrl = "/rest/v1/working_calendar_tpa?select=work_date,is_working_day,shift_hours"
       + "&work_date=gte." + state.from + "&work_date=lte." + state.to + "&order=work_date.asc";
 
+    var absUrl = "/rest/v1/absences_tpa?select=id,employee_id,absence_date"
+      + "&absence_date=gte." + state.from + "&absence_date=lte." + state.to
+      + (state.person ? "&employee_id=eq." + state.person : "")
+      + "&order=absence_date.asc&limit=10000";
+
     return Promise.all([
       api(dailyUrl),
       api(calUrl),
       api("/rest/v1/rpc/ppi_metrics_tpa", { method:"POST",
           body:{ p_from:state.from, p_to:state.to, p_employee:state.person || null } }),
       api("/rest/v1/sync_log_tpa?select=source_tab,started_at,finished_at,rows_upserted,status&order=started_at.desc&limit=6")
-        .catch(function(){ return []; })
+        .catch(function(){ return []; }),
+      api(absUrl).catch(function(){ return []; })
     ]).then(function (res) {
       if (mine !== reqSeq) return;            // a newer request has already landed
       cache.daily = res[0] || [];
       cache.calendar = res[1] || [];
       cache.ppi = res[2] || [];
       cache.sync = res[3] || [];
+      cache.absences = res[4] || [];
       build();
       render();
     }).then(function () {
@@ -526,12 +568,15 @@
   // Model: one row per person, with per-department splits
   // ================================================================
   function capacity() {
-    var h = 0, days = 0;
+    var h = 0, days = 0, byDate = {};
     cache.calendar.forEach(function (c) {
-      h += num(c.shift_hours) || 0;
+      var d = String(c.work_date).slice(0, 10);
+      var sh = num(c.shift_hours) || 0;
+      byDate[d] = sh;
+      h += sh;
       if (c.is_working_day) days += 1;
     });
-    return { hours: h, workingDays: days };
+    return { hours: h, workingDays: days, shiftByDate: byDate };
   }
 
   function blank() { return { est:0, act:0, assigned:0, completed:0, any:false }; }
@@ -572,6 +617,20 @@
       };
     });
 
+    // Absences. person_key is the employee id for anyone the resolver mapped,
+    // so these line up with the work rows without a second lookup. Unmapped
+    // people have no employee_id and therefore can carry no absences.
+    var absBy = {};
+    (cache.absences || []).forEach(function (r) {
+      var k = String(r.employee_id);
+      var d = String(r.absence_date).slice(0, 10);
+      if (!absBy[k]) absBy[k] = { dates: [], hours: 0, on: {} };
+      if (absBy[k].on[d]) return;
+      absBy[k].on[d] = 1;
+      absBy[k].dates.push({ id: r.id, date: d });
+      absBy[k].hours += cap.shiftByDate[d] || 0;   // 0 on a weekend or holiday
+    });
+
     model.rows = Object.keys(by).map(function (k) {
       var p = by[k];
       var sel = state.dept;                       // "", production, aftersales
@@ -583,16 +642,22 @@
         any: p.production.any || p.aftersales.any
       };
 
+      var abs = absBy[k] || { dates: [], hours: 0, on: {} };
+      p.absence      = abs;
+      p.absenceDays  = abs.dates.length;
+      p.absenceHours = abs.hours;
+
       p.shown = chosen;
-      p.capacityHours = cap.hours;
-      p.productivity = productivity(chosen.act, cap.hours);
+      // Available hours are now this person's own. Each absent date removes that
+      // date's shift_hours, so an absence on a non-working day costs nothing.
+      p.capacityHours = Math.max(0, cap.hours - abs.hours);
+      p.productivity = productivity(chosen.act, p.capacityHours);
       p.efficiency   = efficiency(chosen.est, chosen.act);
 
-      p.prodProductivity = productivity(p.production.act, cap.hours);
+      p.prodProductivity = productivity(p.production.act, p.capacityHours);
       p.prodEfficiency   = efficiency(p.production.est, p.production.act);
       p.afsEfficiency    = efficiency(p.aftersales.est, p.aftersales.act);
 
-      p.eligible = isEligible(p);
       p.ppi = ppiBy[k] || null;
 
       // Share of capacity used by repair work plus by inspections.
@@ -600,6 +665,9 @@
       var inspShare  = p.ppi ? p.ppi.pct : null;
       p.combined = (hoursShare === null && inspShare === null)
         ? null : (hoursShare || 0) + (inspShare || 0);
+
+      // Must run last: production eligibility now reads p.combined.
+      p.eligible = isEligible(p);
 
       return p;
     }).filter(function (p) {
@@ -613,9 +681,10 @@
   }
 
   function isEligible(p) {
-    if (state.dept === "production")  return p.prodProductivity !== null && p.prodEfficiency !== null
-                                          && p.prodProductivity >= ELIGIBLE.prodProductivity
-                                          && p.prodEfficiency   >= ELIGIBLE.prodEfficiency;
+    // Production is judged on the combined table: repair-hours share of capacity
+    // plus post-purchase inspection share, added together. Efficiency no longer
+    // gates it. The Combined view below still uses the older two-part test.
+    if (state.dept === "production")  return p.combined !== null && p.combined >= ELIGIBLE.prodCombined;
     if (state.dept === "aftersales")  return p.afsEfficiency !== null && p.afsEfficiency >= ELIGIBLE.afsEfficiency;
     // Combined: eligible if they clear the rule in any department they worked in.
     var prodOk = p.production.any && p.prodProductivity !== null && p.prodEfficiency !== null
@@ -636,14 +705,15 @@
 
   function totalsOf(rows) {
     var cap = capacity();
-    var t = { est:0, act:0, assigned:0, completed:0, people:0, capacity:0, insp:0, target:0 };
+    var t = { est:0, act:0, assigned:0, completed:0, people:0, capacity:0, insp:0, target:0, absences:0 };
     rows.forEach(function (p) {
       t.est += p.shown.est; t.act += p.shown.act;
       t.assigned += p.shown.assigned; t.completed += p.shown.completed;
       if (p.ppi) { t.insp += p.ppi.done; t.target += p.ppi.target || 0; }
+      t.capacity  += p.capacityHours;          // each person's own, after absences
+      t.absences  += p.absenceDays || 0;
       t.people += 1;
     });
-    t.capacity = cap.hours * (t.people || 1);
     t.prod = productivity(t.act, t.capacity);
     t.eff  = efficiency(t.est, t.act);
     t.availPerPerson = cap.hours;
@@ -699,13 +769,25 @@
     }).join("");
   }
 
-  function peopleTableHTML(rows) {
+  /** The editor is live on the dashboard and frozen in the report, so a printed
+   *  report can never be mistaken for something you can type into. */
+  function absCellHTML(p, readOnly) {
+    if (!p.employee_id) return '<span class="pill" title="Unmapped people carry no absences">–</span>';
+    var n = p.absenceDays || 0;
+    var txt = n ? String(n) : "0";
+    if (readOnly) return '<span>' + txt + '</span>';
+    return '<button type="button" class="linkish abs-btn" data-key="' + esc(p.key)
+         + '" title="Edit absence dates">' + txt + '</button>';
+  }
+
+  function peopleTableHTML(rows, readOnly) {
     if (!rows.length) return '<p class="empty">No work recorded in this range.</p>';
     var sorted = rows.slice().sort(function (a,b) { return (b.productivity||-1)-(a.productivity||-1); });
     var maxProd = Math.max(100, Math.max.apply(null, sorted.map(function(p){ return p.productivity||0; })));
     return '<table><thead><tr><th>Employee</th><th class="num">Productivity</th><th class="bar-cell"></th>'
       + '<th class="num">Efficiency</th><th class="num">Actual h</th><th class="num">Allocated h</th>'
-      + '<th class="num">Available h</th><th class="num">Completed</th><th class="num">Assigned</th><th>Eligible</th></tr></thead><tbody>'
+      + '<th class="num">Available h</th><th class="num">Absences</th>'
+      + '<th class="num">Completed</th><th class="num">Assigned</th><th>Eligible</th></tr></thead><tbody>'
       + sorted.map(function (p) {
           return "<tr><td>" + esc(p.label)
             + (p.employee_id ? "" : ' <span class="pill">unmapped</span>') + "</td>"
@@ -716,6 +798,7 @@
             + '<td class="num">'+fmt(p.shown.act,1)+"</td>"
             + '<td class="num">'+fmt(p.shown.est,1)+"</td>"
             + '<td class="num">'+fmt(p.capacityHours,0)+"</td>"
+            + '<td class="num">'+absCellHTML(p, readOnly)+"</td>"
             + '<td class="num">'+p.shown.completed+"</td>"
             + '<td class="num">'+p.shown.assigned+"</td>"
             + "<td>" + (p.eligible ? '<span class="pill ok">eligible</span>' : '<span class="pill">no</span>') + "</td></tr>";
@@ -789,10 +872,21 @@
       byDay[d].people[r.person_key] = 1;
     });
 
+    var absentOn = {};
+    (cache.absences || []).forEach(function (r) {
+      var k = String(r.employee_id), dd = String(r.absence_date).slice(0, 10);
+      if (!absentOn[k]) absentOn[k] = {};
+      absentOn[k][dd] = 1;
+    });
+
     return Object.keys(byDay).sort().map(function (d) {
       var row = byDay[d];
-      var head = Object.keys(row.people).length || 1;
-      var cap = (shift[d] || 0) * head;
+      var keys = Object.keys(row.people);
+      var head = keys.length || 1;
+      var cap = 0;
+      keys.forEach(function (k) {
+        if (!(absentOn[k] && absentOn[k][d])) cap += (shift[d] || 0);
+      });
       return { date:d, est:row.est, act:row.act, headcount:head, capacity:cap,
                prod: productivity(row.act, cap), eff: efficiency(row.est, row.act) };
     });
@@ -940,7 +1034,7 @@
       + '</div></div>'
 
       + '<div class="card"><div class="card-head"><h2>By employee</h2></div><div class="scroll">'
-      + peopleTableHTML(work) + '</div></div>'
+      + peopleTableHTML(work, true) + '</div></div>'
 
       + (showPpi
           ? '<div class="card"><div class="card-head"><h2>Post-purchase inspection</h2></div><div class="scroll">'
@@ -959,6 +1053,103 @@
   // ================================================================
   // Wiring
   // ================================================================
+  // ================================================================
+  // Absence editor
+  // ================================================================
+  var absFor = null;                       // person_key currently being edited
+
+  function absMsg(text, bad) {
+    var el = $("absMsg");
+    el.textContent = text || "";
+    el.style.color = bad ? "var(--critical)" : "var(--text-muted)";
+  }
+
+  function openAbs(key) {
+    var p = null;
+    model.rows.forEach(function (r) { if (r.key === key) p = r; });
+    if (!p || !p.employee_id) return;
+    absFor = key;
+    $("absName").textContent = p.label;
+    $("absHint").textContent = "Dates inside " + shortDate(state.from) + " to " + shortDate(state.to)
+      + ". Each one removes that date's shift from available hours.";
+    $("absDate").value = "";
+    $("absDate").min = state.from;
+    $("absDate").max = state.to;
+    absMsg("");
+    renderAbs();
+    $("absModal").classList.remove("hidden");
+  }
+
+  function closeAbs() {
+    $("absModal").classList.add("hidden");
+    absFor = null;
+  }
+
+  function renderAbs() {
+    var p = null;
+    model.rows.forEach(function (r) { if (r.key === absFor) p = r; });
+    if (!p) return;
+    var cap = capacity();
+    var dates = (p.absence && p.absence.dates || []).slice()
+      .sort(function (a, b) { return a.date < b.date ? -1 : 1; });
+    $("absChips").innerHTML = dates.length
+      ? dates.map(function (d) {
+          var sh = cap.shiftByDate[d.date] || 0;
+          var off = sh === 0;
+          return '<span class="chip' + (off ? " off" : "") + '" title="'
+               + (off ? "Non-working day, deducts nothing" : sh + "h deducted") + '">'
+               + esc(shortDate(d.date)) + (off ? " · 0h" : " · " + fmt(sh, 0) + "h")
+               + ' <button type="button" data-id="' + esc(d.id) + '" aria-label="Remove">&times;</button></span>';
+        }).join("")
+      : '<span class="sub">No absences recorded in this range.</span>';
+    $("absTotal").textContent = p.absenceDays + " day" + (p.absenceDays === 1 ? "" : "s")
+      + ", " + fmt(p.absenceHours, 0) + "h off " + fmt(cap.hours, 0) + "h";
+    $("absChips").querySelectorAll("button[data-id]").forEach(function (b) {
+      b.addEventListener("click", function () { removeAbs(b.getAttribute("data-id")); });
+    });
+  }
+
+  function absBusy(on) {
+    $("absAdd").disabled = on;
+    $("absDate").disabled = on;
+  }
+
+  function addAbs() {
+    var p = null;
+    model.rows.forEach(function (r) { if (r.key === absFor) p = r; });
+    if (!p) return;
+    var d = $("absDate").value;
+    if (!d) { absMsg("Pick a date first.", true); return; }
+    if (d < state.from || d > state.to) { absMsg("That date is outside the selected range.", true); return; }
+    if (p.absence && p.absence.on[d]) { absMsg("Already recorded.", true); return; }
+    absBusy(true); absMsg("Saving…");
+    api("/rest/v1/absences_tpa", {
+      method: "POST",
+      headers: { Prefer: "return=representation" },
+      body: { employee_id: p.employee_id, absence_date: d }
+    }).then(function (rows) {
+      var row = (rows && rows[0]) || null;
+      if (row) cache.absences.push(row);
+      build(); render(); renderAbs();
+      $("absDate").value = "";
+      absMsg("");
+    }).catch(function (e) {
+      absMsg("Could not save: " + e.message, true);
+    }).then(function () { absBusy(false); });
+  }
+
+  function removeAbs(id) {
+    absBusy(true); absMsg("Removing…");
+    api("/rest/v1/absences_tpa?id=eq." + encodeURIComponent(id), { method: "DELETE" })
+      .then(function () {
+        cache.absences = cache.absences.filter(function (r) { return String(r.id) !== String(id); });
+        build(); render(); renderAbs();
+        absMsg("");
+      }).catch(function (e) {
+        absMsg("Could not remove: " + e.message, true);
+      }).then(function () { absBusy(false); });
+  }
+
   function setPreset(p) {
     state.preset = p;
     Array.prototype.forEach.call($("presets").children, function (b) {
@@ -1015,9 +1206,24 @@
     var hidden = $("trendTableWrap").classList.toggle("hidden");
     this.textContent = hidden ? "Show data" : "Hide data";
   });
+  // Delegated: the employee table is rebuilt on every render.
+  document.addEventListener("click", function (ev) {
+    var b = ev.target.closest && ev.target.closest("button.abs-btn");
+    if (b) openAbs(b.getAttribute("data-key"));
+  });
+  $("absAdd").addEventListener("click", addAbs);
+  $("absClose").addEventListener("click", closeAbs);
+  $("absModal").addEventListener("click", function (ev) {
+    if (ev.target === $("absModal")) closeAbs();
+  });
+  $("absDate").addEventListener("keydown", function (ev) {
+    if (ev.key === "Enter") { ev.preventDefault(); addAbs(); }
+  });
+
   $("openReport").addEventListener("click", openReport);
   $("closeReport").addEventListener("click", closeReport);
   document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && !$("absModal").classList.contains("hidden")) { closeAbs(); return; }
     if (e.key === "Escape" && !$("report").classList.contains("hidden")) closeReport();
   });
   $("printReport").addEventListener("click", function () { window.print(); });
