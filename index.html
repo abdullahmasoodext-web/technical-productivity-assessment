@@ -276,7 +276,7 @@
   </div>
 
   <div class="card">
-    <div class="card-head"><h2>By employee</h2><span class="sub" id="peopleScope"></span></div>
+    <div class="card-head"><h2 id="peopleTitle">By employee</h2><span class="sub" id="peopleScope"></span></div>
     <div class="scroll" id="peopleTable"></div>
   </div>
 
@@ -728,6 +728,13 @@
    *  or team productivity is divided by capacity that never existed. */
   function hasWork(p) { return p.shown.any; }
 
+  /** The employee table is named after whatever department is selected, so a
+   *  printed page says what it is showing rather than "By employee". */
+  function deptTitle() {
+    if (!state.dept) return "By employee";
+    return state.dept.charAt(0).toUpperCase() + state.dept.slice(1);
+  }
+
   function render() {
     var rows = visibleRows(false);
     var work = rows.filter(hasWork);
@@ -738,6 +745,7 @@
     renderTiles($("tiles"), totalsOf(work));
     renderTrend();
     $("peopleTable").innerHTML = peopleTableHTML(work);
+    $("peopleTitle").textContent = deptTitle();
     $("peopleScope").textContent = work.length + (work.length === 1 ? " person" : " people")
       + (state.dept ? ", " + state.dept : ", combined")
       + (state.eligible === "yes" ? ", eligible only" : state.eligible === "no" ? ", not eligible" : "");
@@ -798,7 +806,7 @@
             + '<td class="num">'+fmt(p.shown.act,1)+"</td>"
             + '<td class="num">'+fmt(p.shown.est,1)+"</td>"
             + '<td class="num">'+fmt(p.capacityHours,0)+"</td>"
-            + '<td class="num">'+absCellHTML(p, readOnly)+"</td>"
+            + '<td class="num">'+absCellHTML(p, true)+"</td>"
             + '<td class="num">'+p.shown.completed+"</td>"
             + '<td class="num">'+p.shown.assigned+"</td>"
             + "<td>" + (p.eligible ? '<span class="pill ok">eligible</span>' : '<span class="pill">no</span>') + "</td></tr>";
@@ -819,14 +827,15 @@
         }).join("") + "</tbody></table>";
   }
 
-  function combinedTableHTML(rows) {
+  function combinedTableHTML(rows, readOnly) {
     var relevant = rows.filter(function (p) { return p.combined !== null; });
     if (!relevant.length) return '<p class="empty">Nothing to combine in this range.</p>';
     var sorted = relevant.slice().sort(function (a,b) { return (b.combined||-1)-(a.combined||-1); });
     var label = state.dept ? state.dept : "combined";
     return '<table><thead><tr><th>Employee</th><th class="num">Total productivity</th>'
       + '<th class="num">From '+esc(label)+' hours</th><th class="num">From inspections</th>'
-      + '<th class="num">Actual h</th><th class="num">Inspections</th><th>Eligible</th></tr></thead><tbody>'
+      + '<th class="num">Actual h</th><th class="num">Inspections</th>'
+      + '<th class="num">Absences</th><th>Eligible</th></tr></thead><tbody>'
       + sorted.map(function (p) {
           return "<tr><td>"+esc(p.label)+(p.employee_id?"":' <span class="pill">unmapped</span>')+"</td>"
             + '<td class="num" style="color:'+statusColour(p.combined,"prod")+'">'+pct(p.combined)+"</td>"
@@ -834,6 +843,7 @@
             + '<td class="num">'+(p.ppi ? pct(p.ppi.pct) : "–")+"</td>"
             + '<td class="num">'+fmt(p.shown.act,1)+"</td>"
             + '<td class="num">'+(p.ppi ? p.ppi.done : 0)+"</td>"
+            + '<td class="num">'+absCellHTML(p, readOnly)+"</td>"
             + "<td>" + (p.eligible ? '<span class="pill ok">eligible</span>' : '<span class="pill">no</span>') + "</td></tr>";
         }).join("") + "</tbody></table>";
   }
@@ -1026,7 +1036,7 @@
       + (showPpi
           ? '<div class="card"><div class="card-head"><h2>Post inspection + ' + esc(state.dept || "combined")
             + '</h2><span class="sub">Each metric as a share of capacity, added together</span></div>'
-            + '<div class="scroll">' + combinedTableHTML(rows) + '</div></div>'
+            + '<div class="scroll">' + combinedTableHTML(rows, true) + '</div></div>'
           : "")
 
       + '<div class="card"><div class="card-head"><h2>Daily trend</h2></div><div class="charts">'
@@ -1040,7 +1050,7 @@
       +     '<div class="tip" id="rTipEff"></div></div></div>'
       + '</div></div>'
 
-      + '<div class="card"><div class="card-head"><h2>By employee</h2></div><div class="scroll">'
+      + '<div class="card"><div class="card-head"><h2>' + esc(deptTitle()) + '</h2></div><div class="scroll">'
       + peopleTableHTML(work, true) + '</div></div>'
 
       + (showPpi
