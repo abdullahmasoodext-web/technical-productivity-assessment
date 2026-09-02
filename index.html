@@ -250,6 +250,12 @@
 
   <div class="tiles" id="tiles"></div>
 
+  <div class="card" id="combinedCard">
+    <div class="card-head"><h2 id="combinedTitle">Post inspection + combined</h2>
+      <span class="sub">Each metric as a share of capacity, added together</span></div>
+    <div class="scroll" id="combinedTable"></div>
+  </div>
+
   <div class="card">
     <div class="card-head">
       <h2>Daily trend</h2>
@@ -278,12 +284,6 @@
     <div class="card-head"><h2>Post-purchase inspection</h2>
       <span class="sub">Inspections completed against target</span></div>
     <div class="scroll" id="ppiTable"></div>
-  </div>
-
-  <div class="card" id="combinedCard">
-    <div class="card-head"><h2 id="combinedTitle">Post inspection + combined</h2>
-      <span class="sub">Each metric as a share of capacity, added together</span></div>
-    <div class="scroll" id="combinedTable"></div>
   </div>
 
   <p class="foot" id="syncFoot"></p>
@@ -826,14 +826,15 @@
     var label = state.dept ? state.dept : "combined";
     return '<table><thead><tr><th>Employee</th><th class="num">Total productivity</th>'
       + '<th class="num">From '+esc(label)+' hours</th><th class="num">From inspections</th>'
-      + '<th class="num">Actual h</th><th class="num">Inspections</th></tr></thead><tbody>'
+      + '<th class="num">Actual h</th><th class="num">Inspections</th><th>Eligible</th></tr></thead><tbody>'
       + sorted.map(function (p) {
           return "<tr><td>"+esc(p.label)+(p.employee_id?"":' <span class="pill">unmapped</span>')+"</td>"
             + '<td class="num" style="color:'+statusColour(p.combined,"prod")+'">'+pct(p.combined)+"</td>"
             + '<td class="num">'+pct(p.productivity)+"</td>"
             + '<td class="num">'+(p.ppi ? pct(p.ppi.pct) : "–")+"</td>"
             + '<td class="num">'+fmt(p.shown.act,1)+"</td>"
-            + '<td class="num">'+(p.ppi ? p.ppi.done : 0)+"</td></tr>";
+            + '<td class="num">'+(p.ppi ? p.ppi.done : 0)+"</td>"
+            + "<td>" + (p.eligible ? '<span class="pill ok">eligible</span>' : '<span class="pill">no</span>') + "</td></tr>";
         }).join("") + "</tbody></table>";
   }
 
@@ -1022,6 +1023,12 @@
         + "  ·  " + work.length + " people") + '</span></div>'
       + '<div class="tiles">' + host.innerHTML + '</div></div>'
 
+      + (showPpi
+          ? '<div class="card"><div class="card-head"><h2>Post inspection + ' + esc(state.dept || "combined")
+            + '</h2><span class="sub">Each metric as a share of capacity, added together</span></div>'
+            + '<div class="scroll">' + combinedTableHTML(rows) + '</div></div>'
+          : "")
+
       + '<div class="card"><div class="card-head"><h2>Daily trend</h2></div><div class="charts">'
       +   '<div><div class="legend"><span><i class="dot" style="background:var(--series-1)"></i>Productivity %</span>'
       +     '<span class="sub">target 100%</span></div>'
@@ -1039,8 +1046,6 @@
       + (showPpi
           ? '<div class="card"><div class="card-head"><h2>Post-purchase inspection</h2></div><div class="scroll">'
             + ppiTableHTML(rows) + '</div></div>'
-            + '<div class="card"><div class="card-head"><h2>Post inspection + ' + esc(state.dept || "combined")
-            + '</h2></div><div class="scroll">' + combinedTableHTML(rows) + '</div></div>'
           : "");
 
     // Charts have to be drawn after the markup exists, and they follow
