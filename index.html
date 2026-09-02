@@ -251,9 +251,22 @@
   <div class="tiles" id="tiles"></div>
 
   <div class="card" id="combinedCard">
-    <div class="card-head"><h2 id="combinedTitle">Post inspection + combined</h2>
-      <span class="sub">Each metric as a share of capacity, added together</span></div>
+    <div class="card-head"><h2 id="combinedTitle">Combined</h2>
+      <span class="sub" id="combinedSub"></span>
+      <span class="sub" id="combinedScope"></span></div>
     <div class="scroll" id="combinedTable"></div>
+  </div>
+
+  <div class="card" id="deptACard">
+    <div class="card-head"><h2 id="deptATitle">Production only</h2>
+      <span class="sub" id="deptASub"></span></div>
+    <div class="scroll" id="deptATable"></div>
+  </div>
+
+  <div class="card" id="deptBCard">
+    <div class="card-head"><h2 id="deptBTitle">Aftersales only</h2>
+      <span class="sub" id="deptBSub"></span></div>
+    <div class="scroll" id="deptBTable"></div>
   </div>
 
   <div class="card">
@@ -273,11 +286,6 @@
       </div>
     </div>
     <div class="scroll hidden" id="trendTableWrap" style="margin-top:14px"></div>
-  </div>
-
-  <div class="card">
-    <div class="card-head"><h2 id="peopleTitle">By employee</h2><span class="sub" id="peopleScope"></span></div>
-    <div class="scroll" id="peopleTable"></div>
   </div>
 
   <div class="card" id="ppiCard">
@@ -346,15 +354,31 @@
   // efficiency is shown as "-" rather than a meaningless percentage.
   var MIN_ACTUAL_HOURS = 0.02;   // 72 seconds
 
+  // A post-purchase inspection is assumed to take 40 minutes. That figure is
+  // entered as BOTH the estimated hours and the hours worked on the job, so an
+  // inspection contributes its own time to productivity and is exactly
+  // efficiency-neutral at 100%. Consequence worth knowing: a full inspection
+  // target of 6 cars a day is 4.0 of an 8-hour shift, so hitting target
+  // reads 50%, not 100%. Inspections alone cannot clear the 80% gate.
+  var INSPECTION_HOURS = 40 / 60;        // 0.6667 h
+
   // Eligibility thresholds.
-  var ELIGIBLE = { prodProductivity: 80, prodEfficiency: 80, afsEfficiency: 80, prodCombined: 80 };
+  //   production  both combined productivity and combined efficiency >= 80
+  //   aftersales  aftersales efficiency >= 80, unchanged
+  //   combined    the older two-part per-department test, deliberately unchanged
+  var ELIGIBLE = {
+    combProductivity: 80, combEfficiency: 80,
+    prodProductivity: 80, prodEfficiency: 80,
+    afsEfficiency: 80
+  };
 
   var token = null, refreshToken = null, userEmail = null;
   var reqSeq = 0;                        // guards against out-of-order responses
 
   var state = { preset:"30", from:null, to:null, dept:"", person:"", eligible:"" };
-  var cache = { people:[], daily:[], calendar:[], ppi:[], sync:[], absences:[] };
-  var model = { rows:[], ppi:[], excluded:{} };
+  var cache = { people:[], daily:[], calendar:[], ppi:[], ppiDaily:[], sync:[],
+                absences:[], roster:{} };
+  var model = { rows:[], ppi:[], offRoster:[], excluded:{} };
 
   var $ = function (id) { return document.getElementById(id); };
 
@@ -494,9 +518,18 @@
   // Loading
   // ================================================================
   function loadPeople() {
-    return api("/rest/v1/employee_tpa?select=id,full_name,department&is_active=eq.true&order=full_name.asc")
+    return api("/rest/v1/employee_tpa?select=id,full_name,department,scorecard_dept"
+             + "&is_active=eq.true&order=full_name.asc")
       .then(function (rows) {
         cache.people = rows || [];
+        // The scorecard roster decides who each department's tables list.
+        // employee_tpa.department is not usable for this: the resolver rewrites
+        // it on every sync from wherever the person clocked hours, so most
+        // technicians come back as "multi".
+        cache.roster = {};
+        cache.people.forEach(function (p) {
+          if (p.scorecard_dept) cache.roster[p.id] = p.scorecard_dept;
+        });
         var sel = $("person"), keep = sel.value;
         sel.innerHTML = '<option value="">Everyone</option>';
         cache.people.forEach(function (p) {
@@ -529,6 +562,14 @@
       + (state.person ? "&employee_id=eq." + state.person : "")
       + "&order=absence_date.asc&limit=10000";
 
+    // Inspections per person per day, so the trend charts can carry inspection
+    // hours on the day they happened. The aggregate ppi_metrics_tpa below still
+    // supplies the range totals and the absence-aware target.
+    var ppiDailyUrl = "/rest/v1/v_ppi_daily_tpa?select=work_date,employee_id,person_key,inspections_done"
+      + "&work_date=gte." + state.from + "&work_date=lte." + state.to
+      + (state.person ? "&employee_id=eq." + state.person : "")
+      + "&order=work_date.asc&limit=50000";
+
     return Promise.all([
       api(dailyUrl),
       api(calUrl),
@@ -536,7 +577,8 @@
           body:{ p_from:state.from, p_to:state.to, p_employee:state.person || null } }),
       api("/rest/v1/sync_log_tpa?select=source_tab,started_at,finished_at,rows_upserted,status&order=started_at.desc&limit=6")
         .catch(function(){ return []; }),
-      api(absUrl).catch(function(){ return []; })
+      api(absUrl).catch(function(){ return []; }),
+      api(ppiDailyUrl).catch(function(){ return []; })
     ]).then(function (res) {
       if (mine !== reqSeq) return;            // a newer request has already landed
       cache.daily = res[0] || [];
@@ -544,6 +586,7 @@
       cache.ppi = res[2] || [];
       cache.sync = res[3] || [];
       cache.absences = res[4] || [];
+      cache.ppiDaily = res[5] || [];
       build();
       render();
     }).then(function () {
@@ -654,19 +697,29 @@
       p.productivity = productivity(chosen.act, p.capacityHours);
       p.efficiency   = efficiency(chosen.est, chosen.act);
 
+      // Each department on its own, both metrics, against the same capacity.
+      // Both are needed because each department now gets its own table.
       p.prodProductivity = productivity(p.production.act, p.capacityHours);
       p.prodEfficiency   = efficiency(p.production.est, p.production.act);
+      p.afsProductivity  = productivity(p.aftersales.act, p.capacityHours);
       p.afsEfficiency    = efficiency(p.aftersales.est, p.aftersales.act);
 
       p.ppi = ppiBy[k] || null;
+      p.scorecardDept = cache.roster[String(p.employee_id)] || null;
 
-      // Share of capacity used by repair work plus by inspections.
-      var hoursShare = p.productivity;
-      var inspShare  = p.ppi ? p.ppi.pct : null;
-      p.combined = (hoursShare === null && inspShare === null)
-        ? null : (hoursShare || 0) + (inspShare || 0);
+      // Inspections converted to hours at 40 minutes a car, entered as both the
+      // estimate and the time worked. Combined is then one honest ratio rather
+      // than two shares of capacity added together, which is what used to let
+      // this figure read 200%.
+      p.inspections = p.ppi ? p.ppi.done : 0;
+      p.inspHours   = p.inspections * INSPECTION_HOURS;
 
-      // Must run last: production eligibility now reads p.combined.
+      p.combAct = p.production.act + p.aftersales.act + p.inspHours;
+      p.combEst = p.production.est + p.aftersales.est + p.inspHours;
+      p.combProductivity = productivity(p.combAct, p.capacityHours);
+      p.combEfficiency   = efficiency(p.combEst, p.combAct);
+
+      // Must run last: production eligibility reads the combined figures.
       p.eligible = isEligible(p);
 
       return p;
@@ -676,17 +729,32 @@
 
     model.ppi = Object.keys(ppiBy).map(function (k) { return ppiBy[k]; });
 
+    // Anyone with work in this range who is on neither scorecard. Named under
+    // the tables rather than dropped in silence, on the same reasoning as the
+    // Unassigned bucket: a gap you can see gets fixed at source.
+    model.offRoster = model.rows.filter(function (p) {
+      return !p.scorecardDept && (p.combAct > 0 || p.inspections > 0);
+    });
+
     // Reset the report picker to everyone currently visible.
     model.excluded = {};
   }
 
   function isEligible(p) {
-    // Production is judged on the combined table: repair-hours share of capacity
-    // plus post-purchase inspection share, added together. Efficiency no longer
-    // gates it. The Combined view below still uses the older two-part test.
-    if (state.dept === "production")  return p.combined !== null && p.combined >= ELIGIBLE.prodCombined;
-    if (state.dept === "aftersales")  return p.afsEfficiency !== null && p.afsEfficiency >= ELIGIBLE.afsEfficiency;
-    // Combined: eligible if they clear the rule in any department they worked in.
+    // Production is judged on the combined table, meaning production plus
+    // aftersales plus inspections, and both halves of it have to clear 80.
+    if (state.dept === "production") {
+      return p.combProductivity !== null && p.combEfficiency !== null
+          && p.combProductivity >= ELIGIBLE.combProductivity
+          && p.combEfficiency   >= ELIGIBLE.combEfficiency;
+    }
+    // Aftersales is unchanged: efficiency alone.
+    if (state.dept === "aftersales") {
+      return p.afsEfficiency !== null && p.afsEfficiency >= ELIGIBLE.afsEfficiency;
+    }
+    // Combined view: eligible if they clear the rule in any department they
+    // worked in. Deliberately left on the older test, because only the two
+    // department views were specified. Recorded as an open item.
     var prodOk = p.production.any && p.prodProductivity !== null && p.prodEfficiency !== null
                  && p.prodProductivity >= ELIGIBLE.prodProductivity
                  && p.prodEfficiency   >= ELIGIBLE.prodEfficiency;
@@ -694,8 +762,17 @@
     return prodOk || afsOk;
   }
 
+  /** Who the tables list. Selecting a department shows that department's
+   *  scorecard roster, not everyone who happened to clock an hour in it. The
+   *  Combined view keeps showing everyone found in the data. */
+  function inScope(p) {
+    if (!state.dept) return true;
+    return p.scorecardDept === state.dept;
+  }
+
   function visibleRows(useExcluded) {
     return model.rows.filter(function (p) {
+      if (!inScope(p)) return false;
       if (state.eligible === "yes" && !p.eligible) return false;
       if (state.eligible === "no"  &&  p.eligible) return false;
       if (useExcluded && model.excluded[p.key]) return false;
@@ -703,12 +780,21 @@
     });
   }
 
+  /** Team totals for the tiles, on the same combined basis as the first table:
+   *  production hours plus aftersales hours plus inspection hours, over the sum
+   *  of each person's own capacity after absences. */
   function totalsOf(rows) {
     var cap = capacity();
-    var t = { est:0, act:0, assigned:0, completed:0, people:0, capacity:0, insp:0, target:0, absences:0 };
+    var t = { est:0, act:0, prodAct:0, afsAct:0, inspHours:0, assigned:0, completed:0,
+              people:0, capacity:0, insp:0, target:0, absences:0 };
     rows.forEach(function (p) {
-      t.est += p.shown.est; t.act += p.shown.act;
-      t.assigned += p.shown.assigned; t.completed += p.shown.completed;
+      t.est     += p.combEst;
+      t.act     += p.combAct;
+      t.prodAct += p.production.act;
+      t.afsAct  += p.aftersales.act;
+      t.inspHours += p.inspHours;
+      t.assigned  += p.production.assigned + p.aftersales.assigned;
+      t.completed += p.production.completed + p.aftersales.completed;
       if (p.ppi) { t.insp += p.ppi.done; t.target += p.ppi.target || 0; }
       t.capacity  += p.capacityHours;          // each person's own, after absences
       t.absences  += p.absenceDays || 0;
@@ -723,16 +809,37 @@
   // ================================================================
   // Rendering
   // ================================================================
-  /** Only people with clocked hours count towards capacity. Someone who
-   *  did inspections and no repair work must not inflate the headcount,
-   *  or team productivity is divided by capacity that never existed. */
-  function hasWork(p) { return p.shown.any; }
+  /** Contributed something in this range. Inspections count now, because
+   *  inspection hours are part of the numerator; a person who inspected all
+   *  month and clocked no repair work is doing the job, not inflating the
+   *  headcount. Someone with nothing at all is still excluded, or team
+   *  productivity would be divided by capacity that never existed. */
+  function hasWork(p) { return p.production.any || p.aftersales.any || p.inspections > 0; }
 
-  /** The employee table is named after whatever department is selected, so a
-   *  printed page says what it is showing rather than "By employee". */
-  function deptTitle() {
-    if (!state.dept) return "By employee";
-    return state.dept.charAt(0).toUpperCase() + state.dept.slice(1);
+  function cap1(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
+
+  /** Which department gets its own table first. The selected one leads, and
+   *  the other follows. With nothing selected, production leads. */
+  function deptOrder() {
+    if (state.dept === "aftersales") return ["aftersales", "production"];
+    return ["production", "aftersales"];
+  }
+
+  function eligibleRule() {
+    if (state.dept === "production")
+      return "Eligible: combined productivity and combined efficiency both at or above 80%";
+    if (state.dept === "aftersales")
+      return "Eligible: aftersales efficiency at or above 80%";
+    return "Eligible: productivity and efficiency both at or above 80% in a department worked";
+  }
+
+  function offRosterNote() {
+    var off = model.offRoster.filter(function (p) { return true; });
+    if (!state.dept || !off.length) return "";
+    return '<p class="foot" style="margin:10px 2px 0">Not on either scorecard, so absent from the tables above: '
+         + off.map(function (p) {
+             return esc(p.label) + " (" + fmt(p.combAct, 1) + " h)";
+           }).join(", ") + "</p>";
   }
 
   function render() {
@@ -744,31 +851,47 @@
 
     renderTiles($("tiles"), totalsOf(work));
     renderTrend();
-    $("peopleTable").innerHTML = peopleTableHTML(work);
-    $("peopleTitle").textContent = deptTitle();
-    $("peopleScope").textContent = work.length + (work.length === 1 ? " person" : " people")
-      + (state.dept ? ", " + state.dept : ", combined")
+
+    var order = deptOrder();
+    var scope = work.length + (work.length === 1 ? " person" : " people")
       + (state.eligible === "yes" ? ", eligible only" : state.eligible === "no" ? ", not eligible" : "");
-    // Inspections are not aftersales work, so both inspection sections
-    // come off the page entirely when Aftersales is the chosen view.
+
+    // 1. Combined: production plus aftersales plus inspections, one ratio each.
+    $("combinedTitle").textContent = (state.dept ? cap1(state.dept) : "Everyone") + " combined";
+    $("combinedSub").textContent = "Production, aftersales and inspections together. "
+      + "An inspection counts as 40 minutes of both allocated and worked time.";
+    $("combinedScope").textContent = scope + "  ·  " + eligibleRule();
+    $("combinedTable").innerHTML = combinedTableHTML(work, false) + offRosterNote();
+
+    // 2 and 3. Each department on its own, same people, same capacity.
+    ["A", "B"].forEach(function (slot, i) {
+      var d = order[i];
+      $("dept" + slot + "Title").textContent = cap1(d) + " only";
+      $("dept" + slot + "Sub").textContent = d === "production"
+        ? "Production job cards only, against the same available hours."
+        : "Aftersales job cards only, against the same available hours.";
+      $("dept" + slot + "Table").innerHTML = deptTableHTML(work, d);
+    });
+
+    // Inspections are not aftersales work, so the inspection detail table
+    // comes off the page entirely when Aftersales is the chosen view. The
+    // combined table keeps its inspection columns either way, which is a
+    // no-op there because no aftersales technician does inspections.
     var showPpi = state.dept !== "aftersales";
     $("ppiCard").classList.toggle("hidden", !showPpi);
-    $("combinedCard").classList.toggle("hidden", !showPpi);
-    if (showPpi) {
-      $("ppiTable").innerHTML = ppiTableHTML(rows);
-      $("combinedTitle").textContent = "Post inspection + " + (state.dept || "combined");
-      $("combinedTable").innerHTML = combinedTableHTML(rows);
-    }
+    if (showPpi) $("ppiTable").innerHTML = ppiTableHTML(work);
+
     renderSyncFoot();
   }
 
   function renderTiles(host, t) {
     var tiles = [
-      { k:"Productivity", v:pct(t.prod), n:fmt(t.act,1)+" of "+fmt(t.capacity,0)+" available hours", c:statusColour(t.prod,"prod") },
-      { k:"Efficiency",   v:pct(t.eff),  n:fmt(t.est,1)+" allocated vs "+fmt(t.act,1)+" actual", c:statusColour(t.eff,"eff") },
-      { k:"Hours worked", v:fmt(t.act,1), n:t.people+" with recorded work", c:null },
+      { k:"Combined productivity", v:pct(t.prod), n:fmt(t.act,1)+" of "+fmt(t.capacity,0)+" available hours", c:statusColour(t.prod,"prod") },
+      { k:"Combined efficiency",   v:pct(t.eff),  n:fmt(t.est,1)+" allocated vs "+fmt(t.act,1)+" worked", c:statusColour(t.eff,"eff") },
+      { k:"Hours worked", v:fmt(t.act,1), n:fmt(t.prodAct,1)+" prod · "+fmt(t.afsAct,1)+" a/s · "+fmt(t.inspHours,1)+" insp", c:null },
       { k:"Allocated hours", v:fmt(t.est,1), n:"estimated time assigned", c:null },
-      { k:"Jobs completed", v:String(t.completed), n:t.assigned+" assigned in range", c:null }
+      { k:"Jobs completed", v:String(t.completed), n:t.assigned+" assigned in range", c:null },
+      { k:"Inspections", v:String(t.insp), n:"target "+fmt(t.target,0)+" · "+t.people+" people", c:null }
     ];
     host.innerHTML = tiles.map(function (x) {
       return '<div class="tile"><div class="k">'+esc(x.k)+'</div><div class="v">'
@@ -788,28 +911,33 @@
          + '" title="Edit absence dates">' + txt + '</button>';
   }
 
-  function peopleTableHTML(rows, readOnly) {
-    if (!rows.length) return '<p class="empty">No work recorded in this range.</p>';
-    var sorted = rows.slice().sort(function (a,b) { return (b.productivity||-1)-(a.productivity||-1); });
-    var maxProd = Math.max(100, Math.max.apply(null, sorted.map(function(p){ return p.productivity||0; })));
+  /** One department on its own. Same roster and the same available hours as the
+   *  combined table above it, so the two tables are directly comparable and the
+   *  reader can see which department a combined figure came from. */
+  function deptTableHTML(rows, which) {
+    var relevant = rows.filter(function (p) { return p[which].any; });
+    if (!relevant.length) return '<p class="empty">No ' + esc(which) + ' work recorded in this range.</p>';
+    var prodKey = which === "production" ? "prodProductivity" : "afsProductivity";
+    var effKey  = which === "production" ? "prodEfficiency"   : "afsEfficiency";
+    var sorted = relevant.slice().sort(function (a,b) { return (b[prodKey]||-1)-(a[prodKey]||-1); });
+    var maxProd = Math.max(100, Math.max.apply(null, sorted.map(function(p){ return p[prodKey]||0; })));
     return '<table><thead><tr><th>Employee</th><th class="num">Productivity</th><th class="bar-cell"></th>'
-      + '<th class="num">Efficiency</th><th class="num">Actual h</th><th class="num">Allocated h</th>'
-      + '<th class="num">Available h</th><th class="num">Absences</th>'
-      + '<th class="num">Completed</th><th class="num">Assigned</th><th>Eligible</th></tr></thead><tbody>'
+      + '<th class="num">Efficiency</th><th class="num">Worked h</th><th class="num">Allocated h</th>'
+      + '<th class="num">Available h</th><th class="num">Completed</th><th class="num">Assigned</th>'
+      + '</tr></thead><tbody>'
       + sorted.map(function (p) {
+          var d = p[which];
           return "<tr><td>" + esc(p.label)
             + (p.employee_id ? "" : ' <span class="pill">unmapped</span>') + "</td>"
-            + '<td class="num" style="color:'+statusColour(p.productivity,"prod")+'">'+pct(p.productivity)+"</td>"
+            + '<td class="num" style="color:'+statusColour(p[prodKey],"prod")+'">'+pct(p[prodKey])+"</td>"
             + '<td class="bar-cell"><span class="bar-track"><span class="bar-fill" style="width:'
-              + Math.min(100, ((p.productivity||0)/maxProd)*100) + "%;background:"+statusColour(p.productivity,"prod")+'"></span></span></td>'
-            + '<td class="num" style="color:'+statusColour(p.efficiency,"eff")+'">'+pct(p.efficiency)+"</td>"
-            + '<td class="num">'+fmt(p.shown.act,1)+"</td>"
-            + '<td class="num">'+fmt(p.shown.est,1)+"</td>"
+              + Math.min(100, ((p[prodKey]||0)/maxProd)*100) + "%;background:"+statusColour(p[prodKey],"prod")+'"></span></span></td>'
+            + '<td class="num" style="color:'+statusColour(p[effKey],"eff")+'">'+pct(p[effKey])+"</td>"
+            + '<td class="num">'+fmt(d.act,1)+"</td>"
+            + '<td class="num">'+fmt(d.est,1)+"</td>"
             + '<td class="num">'+fmt(p.capacityHours,0)+"</td>"
-            + '<td class="num">'+absCellHTML(p, true)+"</td>"
-            + '<td class="num">'+p.shown.completed+"</td>"
-            + '<td class="num">'+p.shown.assigned+"</td>"
-            + "<td>" + (p.eligible ? '<span class="pill ok">eligible</span>' : '<span class="pill">no</span>') + "</td></tr>";
+            + '<td class="num">'+d.completed+"</td>"
+            + '<td class="num">'+d.assigned+"</td></tr>";
         }).join("") + "</tbody></table>";
   }
 
@@ -827,24 +955,36 @@
         }).join("") + "</tbody></table>";
   }
 
+  /** The headline table: production plus aftersales plus inspections, pooled
+   *  into one productivity and one efficiency. The three hour columns are here
+   *  so the reader can see exactly what went into the two percentages, and so
+   *  the 40-minute inspection assumption is auditable rather than buried. */
   function combinedTableHTML(rows, readOnly) {
-    var relevant = rows.filter(function (p) { return p.combined !== null; });
-    if (!relevant.length) return '<p class="empty">Nothing to combine in this range.</p>';
-    var sorted = relevant.slice().sort(function (a,b) { return (b.combined||-1)-(a.combined||-1); });
-    var label = state.dept ? state.dept : "combined";
-    return '<table><thead><tr><th>Employee</th><th class="num">Total productivity</th>'
-      + '<th class="num">From '+esc(label)+' hours</th><th class="num">From inspections</th>'
-      + '<th class="num">Actual h</th><th class="num">Inspections</th>'
-      + '<th class="num">Absences</th><th>Eligible</th></tr></thead><tbody>'
+    if (!rows.length) return '<p class="empty">Nothing to combine in this range.</p>';
+    var sorted = rows.slice().sort(function (a,b) { return (b.combProductivity||-1)-(a.combProductivity||-1); });
+    // No progress bar here, and Eligible and Absences come immediately after the
+    // two percentages. Thirteen columns pushed both off the right edge of the
+    // card, and one of them is the editor.
+    return '<table><thead><tr><th>Employee</th>'
+      + '<th class="num">Productivity</th><th class="num">Efficiency</th>'
+      + '<th>Eligible</th><th class="num">Absences</th>'
+      + '<th class="num">Prod h</th><th class="num">A/S h</th>'
+      + '<th class="num">Insp</th><th class="num">Insp h</th>'
+      + '<th class="num">Worked h</th><th class="num">Allocated h</th>'
+      + '<th class="num">Available h</th></tr></thead><tbody>'
       + sorted.map(function (p) {
           return "<tr><td>"+esc(p.label)+(p.employee_id?"":' <span class="pill">unmapped</span>')+"</td>"
-            + '<td class="num" style="color:'+statusColour(p.combined,"prod")+'">'+pct(p.combined)+"</td>"
-            + '<td class="num">'+pct(p.productivity)+"</td>"
-            + '<td class="num">'+(p.ppi ? pct(p.ppi.pct) : "–")+"</td>"
-            + '<td class="num">'+fmt(p.shown.act,1)+"</td>"
-            + '<td class="num">'+(p.ppi ? p.ppi.done : 0)+"</td>"
+            + '<td class="num" style="color:'+statusColour(p.combProductivity,"prod")+'">'+pct(p.combProductivity)+"</td>"
+            + '<td class="num" style="color:'+statusColour(p.combEfficiency,"eff")+'">'+pct(p.combEfficiency)+"</td>"
+            + "<td>" + (p.eligible ? '<span class="pill ok">eligible</span>' : '<span class="pill">no</span>') + "</td>"
             + '<td class="num">'+absCellHTML(p, readOnly)+"</td>"
-            + "<td>" + (p.eligible ? '<span class="pill ok">eligible</span>' : '<span class="pill">no</span>') + "</td></tr>";
+            + '<td class="num">'+fmt(p.production.act,1)+"</td>"
+            + '<td class="num">'+fmt(p.aftersales.act,1)+"</td>"
+            + '<td class="num">'+p.inspections+"</td>"
+            + '<td class="num">'+fmt(p.inspHours,1)+"</td>"
+            + '<td class="num">'+fmt(p.combAct,1)+"</td>"
+            + '<td class="num">'+fmt(p.combEst,1)+"</td>"
+            + '<td class="num">'+fmt(p.capacityHours,0)+"</td></tr>";
         }).join("") + "</tbody></table>";
   }
 
@@ -866,6 +1006,10 @@
   // ================================================================
   // Charts
   // ================================================================
+  /** The daily trend is on the same combined basis as the first table: both
+   *  departments plus inspections at 40 minutes a car, over the capacity of the
+   *  people who actually contributed that day. Department rows are no longer
+   *  filtered by the dropdown, because the roster already decides who is in. */
   function dailySeries(useExcluded) {
     var shift = {};
     cache.calendar.forEach(function (c) { shift[String(c.work_date).slice(0,10)] = num(c.shift_hours) || 0; });
@@ -873,14 +1017,25 @@
     visibleRows(!!useExcluded).forEach(function (p) { allowed[p.key] = 1; });
 
     var byDay = {};
-    cache.daily.forEach(function (r) {
-      if (state.dept && r.department !== state.dept) return;
-      if (!allowed[r.person_key]) return;
-      var d = String(r.work_date).slice(0,10);
+    function dayOf(d) {
       if (!byDay[d]) byDay[d] = { date:d, est:0, act:0, people:{} };
-      byDay[d].est += num(r.estimated_hours) || 0;
-      byDay[d].act += num(r.actual_hours) || 0;
-      byDay[d].people[r.person_key] = 1;
+      return byDay[d];
+    }
+    cache.daily.forEach(function (r) {
+      if (!allowed[r.person_key]) return;
+      var row = dayOf(String(r.work_date).slice(0,10));
+      row.est += num(r.estimated_hours) || 0;
+      row.act += num(r.actual_hours) || 0;
+      row.people[r.person_key] = 1;
+    });
+    (cache.ppiDaily || []).forEach(function (r) {
+      if (!allowed[r.person_key]) return;
+      var h = (num(r.inspections_done) || 0) * INSPECTION_HOURS;
+      if (!h) return;
+      var row = dayOf(String(r.work_date).slice(0,10));
+      row.est += h;                        // an inspection is efficiency-neutral,
+      row.act += h;                        // so it goes into both halves
+      row.people[r.person_key] = 1;
     });
 
     var absentOn = {};
@@ -1026,6 +1181,7 @@
     renderTiles(host, t);
 
     var showPpi = state.dept !== "aftersales";
+    var order = deptOrder();
 
     $("reportBody").innerHTML =
         '<div class="card"><div class="card-head"><h2>Technical Productivity report</h2>'
@@ -1033,11 +1189,21 @@
         + "  ·  " + work.length + " people") + '</span></div>'
       + '<div class="tiles">' + host.innerHTML + '</div></div>'
 
-      + (showPpi
-          ? '<div class="card"><div class="card-head"><h2>Post inspection + ' + esc(state.dept || "combined")
-            + '</h2><span class="sub">Each metric as a share of capacity, added together</span></div>'
-            + '<div class="scroll">' + combinedTableHTML(rows, true) + '</div></div>'
-          : "")
+      + '<div class="card"><div class="card-head"><h2>'
+        + esc((state.dept ? cap1(state.dept) : "Everyone") + " combined") + '</h2>'
+        + '<span class="sub">Production, aftersales and inspections together. '
+        + 'An inspection counts as 40 minutes of both allocated and worked time. '
+        + esc(eligibleRule()) + '</span></div>'
+      + '<div class="scroll">' + combinedTableHTML(work, true) + '</div>'
+      + offRosterNote() + '</div>'
+
+      + order.map(function (d) {
+          return '<div class="card"><div class="card-head"><h2>' + esc(cap1(d) + " only") + '</h2>'
+            + '<span class="sub">' + esc(d === "production"
+                ? "Production job cards only, against the same available hours."
+                : "Aftersales job cards only, against the same available hours.") + '</span></div>'
+            + '<div class="scroll">' + deptTableHTML(work, d) + '</div></div>';
+        }).join("")
 
       + '<div class="card"><div class="card-head"><h2>Daily trend</h2></div><div class="charts">'
       +   '<div><div class="legend"><span><i class="dot" style="background:var(--series-1)"></i>Productivity %</span>'
@@ -1050,12 +1216,9 @@
       +     '<div class="tip" id="rTipEff"></div></div></div>'
       + '</div></div>'
 
-      + '<div class="card"><div class="card-head"><h2>' + esc(deptTitle()) + '</h2></div><div class="scroll">'
-      + peopleTableHTML(work, true) + '</div></div>'
-
       + (showPpi
           ? '<div class="card"><div class="card-head"><h2>Post-purchase inspection</h2></div><div class="scroll">'
-            + ppiTableHTML(rows) + '</div></div>'
+            + ppiTableHTML(work) + '</div></div>'
           : "");
 
     // Charts have to be drawn after the markup exists, and they follow
