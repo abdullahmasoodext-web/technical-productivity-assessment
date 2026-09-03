@@ -354,13 +354,15 @@
   // efficiency is shown as "-" rather than a meaningless percentage.
   var MIN_ACTUAL_HOURS = 0.02;   // 72 seconds
 
-  // A post-purchase inspection is assumed to take 40 minutes. That figure is
-  // entered as BOTH the estimated hours and the hours worked on the job, so an
-  // inspection contributes its own time to productivity and is exactly
-  // efficiency-neutral at 100%. Consequence worth knowing: a full inspection
-  // target of 6 cars a day is 4.0 of an 8-hour shift, so hitting target
-  // reads 50%, not 100%. Inspections alone cannot clear the 80% gate.
-  var INSPECTION_HOURS = 40 / 60;        // 0.6667 h
+  // A post-purchase inspection is assumed to take 1.33 hours, which is 79.8
+  // minutes. That figure is entered as BOTH the estimated hours and the hours
+  // worked on the job, so an inspection contributes its own time to
+  // productivity and is exactly efficiency-neutral at 100%.
+  //
+  // The value is close to a full shift divided by the daily target: 8 hours
+  // over 6 cars is 1.3333, or 80 minutes exactly, which would put a technician
+  // who hits target dead on 100%. At 1.33 they land on 99.75% instead.
+  var INSPECTION_HOURS = 1.33;
 
   // Eligibility thresholds.
   //   production  both combined productivity and combined efficiency >= 80
@@ -378,7 +380,7 @@
   var state = { preset:"30", from:null, to:null, dept:"", person:"", eligible:"" };
   var cache = { people:[], daily:[], calendar:[], ppi:[], ppiDaily:[], sync:[],
                 absences:[], roster:{} };
-  var model = { rows:[], ppi:[], offRoster:[], excluded:{} };
+  var model = { rows:[], ppi:[], excluded:{} };
 
   var $ = function (id) { return document.getElementById(id); };
 
@@ -729,13 +731,6 @@
 
     model.ppi = Object.keys(ppiBy).map(function (k) { return ppiBy[k]; });
 
-    // Anyone with work in this range who is on neither scorecard. Named under
-    // the tables rather than dropped in silence, on the same reasoning as the
-    // Unassigned bucket: a gap you can see gets fixed at source.
-    model.offRoster = model.rows.filter(function (p) {
-      return !p.scorecardDept && (p.combAct > 0 || p.inspections > 0);
-    });
-
     // Reset the report picker to everyone currently visible.
     model.excluded = {};
   }
@@ -833,15 +828,6 @@
     return "Eligible: productivity and efficiency both at or above 80% in a department worked";
   }
 
-  function offRosterNote() {
-    var off = model.offRoster.filter(function (p) { return true; });
-    if (!state.dept || !off.length) return "";
-    return '<p class="foot" style="margin:10px 2px 0">Not on either scorecard, so absent from the tables above: '
-         + off.map(function (p) {
-             return esc(p.label) + " (" + fmt(p.combAct, 1) + " h)";
-           }).join(", ") + "</p>";
-  }
-
   function render() {
     var rows = visibleRows(false);
     var work = rows.filter(hasWork);
@@ -859,9 +845,9 @@
     // 1. Combined: production plus aftersales plus inspections, one ratio each.
     $("combinedTitle").textContent = (state.dept ? cap1(state.dept) : "Everyone") + " combined";
     $("combinedSub").textContent = "Production, aftersales and inspections together. "
-      + "An inspection counts as 40 minutes of both allocated and worked time.";
+      + "An inspection counts as 1.33 hours of both allocated and worked time.";
     $("combinedScope").textContent = scope + "  ·  " + eligibleRule();
-    $("combinedTable").innerHTML = combinedTableHTML(work, false) + offRosterNote();
+    $("combinedTable").innerHTML = combinedTableHTML(work, false);
 
     // 2 and 3. Each department on its own, same people, same capacity.
     ["A", "B"].forEach(function (slot, i) {
@@ -1192,10 +1178,9 @@
       + '<div class="card"><div class="card-head"><h2>'
         + esc((state.dept ? cap1(state.dept) : "Everyone") + " combined") + '</h2>'
         + '<span class="sub">Production, aftersales and inspections together. '
-        + 'An inspection counts as 40 minutes of both allocated and worked time. '
+        + 'An inspection counts as 1.33 hours of both allocated and worked time. '
         + esc(eligibleRule()) + '</span></div>'
-      + '<div class="scroll">' + combinedTableHTML(work, true) + '</div>'
-      + offRosterNote() + '</div>'
+      + '<div class="scroll">' + combinedTableHTML(work, true) + '</div></div>'
 
       + order.map(function (d) {
           return '<div class="card"><div class="card-head"><h2>' + esc(cap1(d) + " only") + '</h2>'
