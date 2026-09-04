@@ -954,9 +954,9 @@
     return '<table><thead><tr><th>Employee</th>'
       + '<th class="num">Productivity</th><th class="num">Efficiency</th>'
       + '<th>Eligible</th><th class="num">Absences</th>'
-      + '<th class="num">Prod h</th><th class="num">A/S h</th>'
+      + '<th class="num">Prod h</th><th class="num">Allocated h</th><th class="num">A/S h</th>'
       + '<th class="num">Insp</th><th class="num">Insp h</th>'
-      + '<th class="num">Worked h</th><th class="num">Allocated h</th>'
+      + '<th class="num">Worked h</th>'
       + '<th class="num">Available h</th></tr></thead><tbody>'
       + sorted.map(function (p) {
           return "<tr><td>"+esc(p.label)+(p.employee_id?"":' <span class="pill">unmapped</span>')+"</td>"
@@ -965,11 +965,11 @@
             + "<td>" + (p.eligible ? '<span class="pill ok">eligible</span>' : '<span class="pill">no</span>') + "</td>"
             + '<td class="num">'+absCellHTML(p, readOnly)+"</td>"
             + '<td class="num">'+fmt(p.production.act,1)+"</td>"
+            + '<td class="num">'+fmt(p.combEst,1)+"</td>"
             + '<td class="num">'+fmt(p.aftersales.act,1)+"</td>"
             + '<td class="num">'+p.inspections+"</td>"
             + '<td class="num">'+fmt(p.inspHours,1)+"</td>"
             + '<td class="num">'+fmt(p.combAct,1)+"</td>"
-            + '<td class="num">'+fmt(p.combEst,1)+"</td>"
             + '<td class="num">'+fmt(p.capacityHours,0)+"</td></tr>";
         }).join("") + "</tbody></table>";
   }
